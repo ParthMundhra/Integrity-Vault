@@ -1,0 +1,53 @@
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: forensics-backend
+    environment:
+      DATABASE_URL: postgresql://forensics_user:forensics_password@postgres:5432/forensics_db
+      BLOCKCHAIN_RPC_URL: http://ganache:8545
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - ganache
+    networks:
+      - forensics-net
+
+  postgres:
+    image: postgres:16
+    container_name: forensics-postgres
+    environment:
+      POSTGRES_USER: forensics_user
+      POSTGRES_PASSWORD: forensics_password
+      POSTGRES_DB: forensics_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - forensics-net
+
+  ganache:
+    image: trufflesuite/ganache:v7.9.2
+    container_name: forensics-ganache
+    command:
+      - --host=0.0.0.0
+      - --port=8545
+      - --chain.chainId=1337
+      - --wallet.totalAccounts=10
+    ports:
+      - "8545:8545"
+    networks:
+      - forensics-net
+
+volumes:
+  postgres-data:
+
+networks:
+  forensics-net:
+    driver: bridge
+
