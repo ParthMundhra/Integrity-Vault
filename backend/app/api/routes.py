@@ -1,86 +1,131 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException
-from fastapi import status
+import logging
+import os
+from uuid import UUID
 
-from app.services import hashing
+from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
+
+from app.db.database import get_db
+from app.db.models import Evidence
+from app.services.hashing import hash_file
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+storage_path = os.path.join(BASE_DIR, "storage")
+os.makedirs(storage_path, exist_ok=True)
 
 
-@router.post(
-    "/evidence/upload",
-    status_code=status.HTTP_201_CREATED,
-    summary="Upload and register new evidence",
-)
-async def upload_evidence(file: UploadFile = File(...)) -> dict:
-    """
-    Receive an evidence file, compute its hash, and queue it for registration.
+def success_response(data: dict, status_code: int = 200) -> JSONResponse:
+    return JSONResponse(status_code=status_code, content={"status": "success", "data": data})
 
-    In a full implementation this endpoint will:
-    - Stream the file to secure off-chain storage.
-    - Compute a SHA-256 hash of the file contents.
-    - Persist metadata to PostgreSQL.
-    - Submit a transaction to the Ethereum smart contract.
-    """
+
+def error_response(message: str, status_code: int) -> JSONResponse:
+    return JSONResponse(status_code=status_code, content={"status": "error", "message": message})
+
+
+def is_valid_uuid(value: str) -> bool:
+    try:
+        UUID(value)
+        return True
+    except ValueError:
+        return False
+
+
+@router.post("/evidence/upload")
+async def upload_evidence(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    if file is None or not file.filename:
+        return error_response("No file was provided", 400)
+
     content = await file.read()
-    file_hash = hashing.compute_sha256(content)
+    if not content:
+        return error_response("Uploaded file is empty", 400)
 
-    # Placeholder response; persistence and blockchain integration to be added.
-    return {
-        "message": "Evidence received (placeholder).",
-        "filename": file.filename,
-        "sha256": file_hash,
-    }
+    try:
+        file_hash = hash_file(content)
+        original_name = os.path.basename(file.filename)
 
-
-@router.get(
-    "/evidence/{evidence_id}",
-    status_code=status.HTTP_200_OK,
-    summary="Retrieve evidence metadata by ID",
-)
-async def get_evidence(evidence_id: str) -> dict:
-    """
-    Retrieve evidence metadata by its identifier.
-
-    In a full implementation this endpoint will:
-    - Query PostgreSQL for evidence metadata and status.
-    - Optionally return pointers to off-chain storage (never raw evidence by default).
-    - Cross-reference blockchain transaction hashes for this evidence ID.
-    """
-    # Placeholder implementation.
-    if not evidence_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Evidence ID must be provided.",
+        evidence = Evidence(
+            file_name=original_name,
+            hash=file_hash,
         )
 
-    return {
-        "evidence_id": evidence_id,
-        "status": "placeholder",
-        "details": "Evidence lookup not yet implemented.",
-    }
+        db.add(evidence)
+        db.flush()
+
+        file_path = os.path.join(storage_path, f"{evidence.id}_{original_name}")
+        with open(file_path, "wb") as file_handle:
+            file_handle.write(content)
+
+        evidence.file_path = file_path
+        db.commit()
+        db.refresh(evidence)
+    except Exception as exc:
+        logger.exception("Failed to store evidence: %s", exc)
+        db.rollback()
+        if "file_path" in locals() and os.path.exists(file_path):
+            os.remove(file_path)
+        return error_response("Failed to store evidence", 500)
+
+    return success_response(
+        {
+            "evidence_id": evidence.id,
+            "file_name": evidence.file_name,
+            "hash": evidence.hash,
+            "file_path": evidence.file_path,
+        },
+        status_code=201,
+    )
 
 
-@router.post(
-    "/evidence/verify",
-    status_code=status.HTTP_200_OK,
-    summary="Verify evidence integrity against stored hash",
-)
-async def verify_evidence(file: UploadFile = File(...)) -> dict:
-    """
-    Verify the integrity of an evidence file.
+@router.get("/evidence/{evidence_id}")
+def get_evidence(evidence_id: str, db: Session = Depends(get_db)):
+    if not is_valid_uuid(evidence_id):
+        return error_response("Invalid evidence_id format", 400)
 
-    In a full implementation this endpoint will:
-    - Compute the file's SHA-256 hash.
-    - Look up the canonical hash for this evidence from PostgreSQL / blockchain.
-    - Return a match/mismatch result and relevant blockchain references.
-    """
-    content = await file.read()
-    file_hash = hashing.compute_sha256(content)
+    evidence = db.query(Evidence).filter(Evidence.id == evidence_id).first()
+    if not evidence:
+        return error_response("Evidence not found", 404)
 
-    # Placeholder comparison; no stored hash is checked yet.
-    return {
-        "sha256": file_hash,
-        "verified": False,
-        "details": "Verification logic not yet implemented.",
-    }
+    return success_response(
+        {
+            "evidence_id": evidence.id,
+            "file_name": evidence.file_name,
+            "hash": evidence.hash,
+            "file_path": evidence.file_path,
+        }
+    )
 
+
+@router.get("/evidence/verify/{evidence_id}")
+def verify_stored_evidence(evidence_id: str, db: Session = Depends(get_db)):
+    if not is_valid_uuid(evidence_id):
+        return error_response("Invalid evidence_id format", 400)
+
+    evidence = db.query(Evidence).filter(Evidence.id == evidence_id).first()
+    if not evidence:
+        return error_response("Evidence not found", 404)
+    if not evidence.file_path:
+        return error_response("Evidence file path is missing", 500)
+
+    if not os.path.exists(evidence.file_path):
+        return error_response("Stored evidence file not found on disk", 404)
+
+    with open(evidence.file_path, "rb") as file_handle:
+        content = file_handle.read()
+    if not content:
+        return error_response("Stored evidence file is empty", 400)
+
+    current_hash = hash_file(content)
+    verification_status = "VERIFIED" if current_hash == evidence.hash else "TAMPERED"
+
+    return success_response(
+        {
+            "evidence_id": evidence.id,
+            "verification_status": verification_status,
+            "stored_hash": evidence.hash,
+            "current_hash": current_hash,
+        }
+    )

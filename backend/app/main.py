@@ -2,6 +2,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router as api_router
+from app.db.database import engine
+from app.db.models import Base
+
+Base.metadata.create_all(bind=engine)
 
 
 def create_application() -> FastAPI:
