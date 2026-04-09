@@ -1,41 +1,91 @@
 ## Backend Service (`backend/`)
 
-The backend is a **FastAPI** service that provides the core API surface for the Blockchain‑Backed Tamper‑Proof Digital Forensics & Chain‑of‑Custody System.
+This backend is a FastAPI service for evidence ingestion and integrity validation in the Blockchain-backed Digital Forensics & Chain-of-Custody system.
 
-It is responsible for:
+### How file storage works
 
-- **Evidence lifecycle management**
-  - Accepting evidence uploads from the frontend.
-  - Orchestrating off‑chain storage and metadata persistence.
-  - Providing APIs to retrieve and verify evidence.
+- Uploaded files are stored on disk under `backend/storage/`.
+- Each file is saved with a unique name:
+  - `{evidence_id}_{original_filename}`
+- Metadata persisted in DB:
+  - `id`
+  - `file_name`
+  - `hash` (SHA-256)
+  - `file_path` (absolute path to stored file)
 
-- **Hashing & integrity**
-  - Computing **SHA‑256** hashes for evidence files via `app/services/hashing.py`.
-  - Recomputing hashes during verification and comparing them with stored values and blockchain records.
+### How verification works
 
-- **Encryption (off‑chain evidence)**
-  - Defining the interface for **AES** encryption in `app/services/encryption.py`.
-  - Actual key management and cryptographic implementation will be integrated with a dedicated KMS or secrets manager.
+- Endpoint: `GET /api/evidence/verify/{evidence_id}`
+- Flow:
+  1. Validate evidence ID format.
+  2. Fetch evidence record from DB.
+  3. Load file using stored `file_path`.
+  4. Re-hash file contents.
+  5. Compare current hash vs stored hash.
+  6. Return `VERIFIED` or `TAMPERED`.
 
-- **Database access**
-  - Managing the **PostgreSQL** connection and sessions via `app/db/database.py`.
-  - Persisting evidence metadata, custody references, and audit logs (models to be added).
+### API response format
 
-- **Blockchain integration**
-  - Coordinating with the Ethereum smart contract layer to:
-    - Register evidence hashes.
-    - Append custody events for actions such as collect, transfer, view, and verify.
+All endpoints follow a consistent structure.
 
-### Structure
+- Success:
 
-- `app/main.py` – FastAPI application factory and entrypoint.
-- `app/api/routes.py` – API router and placeholder endpoints:
-  - `POST /api/evidence/upload`
-  - `GET /api/evidence/{id}`
-  - `POST /api/evidence/verify`
-- `app/services/hashing.py` – SHA‑256 hashing utilities for evidence data.
-- `app/services/encryption.py` – AES encryption/decryption interface (placeholder).
-- `app/db/database.py` – PostgreSQL engine and session helpers.
-- `requirements.txt` – Python dependencies for the backend service.
+```json
+{
+  "status": "success",
+  "data": {}
+}
+```
 
-The backend is designed to be **modular**, **secure‑by‑default**, and ready to be extended with authentication, authorization, detailed models, and blockchain clients.
+- Error:
+
+```json
+{
+  "status": "error",
+  "message": "..."
+}
+```
+
+### Run locally
+
+From `backend/`:
+
+1. Create and activate a virtual environment.
+2. Install dependencies:
+   - `pip install -r requirements.txt`
+3. (Optional) Set `DATABASE_URL`:
+   - If omitted, backend falls back to SQLite (`sqlite:///./test.db`).
+4. Run:
+   - `uvicorn app.main:app --reload --host 0.0.0.0 --port 8000`
+
+### SQLite schema change note
+
+- The `Evidence` table now includes `file_path`.
+- If you are using SQLite with the existing `backend/test.db`, delete `backend/test.db` and restart the backend so the updated schema is recreated.
+
+### Run with Docker
+
+From project root:
+
+1. Build and start services:
+   - `docker compose up --build`
+2. Backend:
+   - `http://localhost:8000`
+3. Postgres:
+   - `localhost:5432`
+   - user: `forensic`
+   - password: `forensic`
+   - database: `forensic_db`
+
+`docker-compose.yml` injects:
+
+- `DATABASE_URL=postgresql://forensic:forensic@db:5432/forensic_db`
+
+### Key files
+
+- `app/main.py` - app entrypoint
+- `app/api/routes.py` - upload, fetch, and verify routes
+- `app/db/models.py` - evidence ORM model
+- `app/db/database.py` - DB engine/session configuration (env-aware)
+- `storage/` - persisted evidence files
+- `Dockerfile` - backend container build

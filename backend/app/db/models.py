@@ -10,3 +10,4 @@ class Evidence(Base):
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     file_name = Column(String)
     hash = Column(String)
+    file_path = Column(String)

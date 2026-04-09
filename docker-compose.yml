@@ -1,0 +1,22 @@
+version: "3.9"
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    environment:
+      DATABASE_URL: postgresql://forensic:forensic@db:5432/forensic_db
+    depends_on:
+      - db
+
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: forensic
+      POSTGRES_PASSWORD: forensic
+      POSTGRES_DB: forensic_db
+    ports:
+      - "5432:5432"
