@@ -2,12 +2,13 @@ import logging
 import os
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, Form, UploadFile
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
 from app.db.models import Evidence
+from app.services.blockchain import register_on_chain, verify_on_chain
 from app.services.hashing import hash_file
 
 router = APIRouter()
@@ -69,12 +70,19 @@ async def upload_evidence(file: UploadFile = File(...), db: Session = Depends(ge
             os.remove(file_path)
         return error_response("Failed to store evidence", 500)
 
+    blockchain_tx = None
+    try:
+        blockchain_tx = register_on_chain(file_hash)
+    except Exception as exc:
+        logger.exception("Blockchain registration failed for evidence %s: %s", evidence.id, exc)
+
     return success_response(
         {
             "evidence_id": evidence.id,
             "file_name": evidence.file_name,
             "hash": evidence.hash,
             "file_path": evidence.file_path,
+            "blockchain_tx": blockchain_tx,
         },
         status_code=201,
     )
@@ -99,33 +107,39 @@ def get_evidence(evidence_id: str, db: Session = Depends(get_db)):
     )
 
 
-@router.get("/evidence/verify/{evidence_id}")
-def verify_stored_evidence(evidence_id: str, db: Session = Depends(get_db)):
+@router.post("/evidence/verify")
+async def verify_stored_evidence(
+    evidence_id: str = Form(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
     if not is_valid_uuid(evidence_id):
         return error_response("Invalid evidence_id format", 400)
 
     evidence = db.query(Evidence).filter(Evidence.id == evidence_id).first()
     if not evidence:
         return error_response("Evidence not found", 404)
-    if not evidence.file_path:
-        return error_response("Evidence file path is missing", 500)
 
-    if not os.path.exists(evidence.file_path):
-        return error_response("Stored evidence file not found on disk", 404)
+    original_hash = evidence.hash
 
-    with open(evidence.file_path, "rb") as file_handle:
-        content = file_handle.read()
+    # Defensive reset to ensure the uploaded stream is read from the beginning.
+    await file.seek(0)
+    content = await file.read()
     if not content:
-        return error_response("Stored evidence file is empty", 400)
+        return error_response("Empty file received", 400)
 
-    current_hash = hash_file(content)
-    verification_status = "VERIFIED" if current_hash == evidence.hash else "TAMPERED"
+    new_hash = hash_file(content)
+    db_verification = "VERIFIED" if new_hash == original_hash else "TAMPERED"
+
+    blockchain_verification = False
+    try:
+        blockchain_verification = verify_on_chain(new_hash)
+    except Exception as exc:
+        logger.exception("Blockchain verification failed for evidence %s: %s", evidence.id, exc)
 
     return success_response(
         {
-            "evidence_id": evidence.id,
-            "verification_status": verification_status,
-            "stored_hash": evidence.hash,
-            "current_hash": current_hash,
+            "db_verification": db_verification,
+            "blockchain_verification": blockchain_verification,
         }
     )
